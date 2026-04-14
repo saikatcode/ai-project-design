@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /b \"c:\\\\Users\\\\saika\\\\OneDrive\\\\Documents\\\\ai-project-design\")",
+      "Bash(exit 0)",
+      "Bash(python3 -c ':*)",
+      "Bash(pip show:*)",
+      "Bash(cmd /c \"python --version && python -c \\\\\"import openpyxl; print\\('openpyxl OK'\\)\\\\\"\")",
+      "Bash(cmd /c \"python -c \\\\\"import openpyxl; wb=openpyxl.load_workbook\\(r'c:\\\\\\\\Users\\\\\\\\saika\\\\\\\\OneDrive\\\\\\\\Documents\\\\\\\\ai-project-design\\\\\\\\Meeting Snippet, summary and Meeting prep note input output samples.xlsx'\\); print\\('Sheets:', wb.sheetnames\\)\\\\\"\")",
+      "Bash(cmd /c python -c \"import openpyxl\")",
+      "Bash(powershell -Command \"python -c 'import openpyxl; print\\(openpyxl.__version__\\)'\")"
+    ]
+  }
+}
