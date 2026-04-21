@@ -12,7 +12,9 @@
 
 `POST /llm/meeting-summary` handles all LLM operations related to meeting audio processing and summarisation. Operations are distinguished by `subIntent` in the request. The Orchestrator resolves subIntent before calling this endpoint and assembles all context.
 
-**Caller flow**: Pega → Axway T2 → Orchestrator → `POST /llm/meeting-summary` (AI Team)
+**Caller flow**: Pega → Axway T2 → Orchestrator → AWS API Gateway → `POST /llm/meeting-summary` (AI Team)
+
+> **Note**: Two API gateways are in the call chain with different roles. Axway T2 is the enterprise API gateway for inbound calls (Pega → Orchestrator). AWS API Gateway is the AI team's outbound boundary (Orchestrator → LLM services) — it authenticates and routes calls into the AI team's private VPC. Authentication mechanism for AWS API Gateway calls (API key, SigV4, or custom authorizer) to be confirmed with AI team.
 
 ### SubIntent Registry
 
@@ -40,21 +42,7 @@
   "intent": "MEETING_SUMMARY",
   "subIntent": "SNIPPET | FULL_SUMMARY | SHARABLE_SUMMARY",
 
-  "modelConfig": {
-    "processingMode": "FAST | STANDARD | DEEP_THINK",
-    "maxOutputTokens": "number"
-  },
-
-  "prompt": {
-    "templateId": "string — references prompt template in Intent Registry",
-    "templateVersion": "string — version for traceability and rollback",
-    "variables": {
-      "key": "value — key-value pairs substituted into the template at runtime (e.g. market, language, numCustomers, agentName)"
-    },
-    "systemInstruction": "string | null — optional override; use only when dynamic context cannot be expressed via variables",
-    "developerInstruction": "string | null — optional override",
-    "userInstruction": "string | null — optional override"
-  },
+  "userInstruction": "string | null — free-text instruction from the end user; null for all UC-01 fixed-intent flows",
 
   "meetingContext": {
     "meetingId": "string",
@@ -68,7 +56,8 @@
         "speakerId": "string — e.g. spk_1, spk_2",
         "customerId": "string — confirmed by agent tagging step; null if not yet tagged"
       }
-    ]
+    ],
+    "editedSummaryText": "string | null — agent-reviewed and edited meeting summary text; populated for SHARABLE_SUMMARY only; null for all other subIntents"
   },
 
   "customerContext": [
@@ -85,21 +74,9 @@
     "agentName": "string"
   },
 
-  "grounding": {
-    "retrievedContext": [
-      {
-        "sourceId": "string",
-        "sourceType": "ATTRIBUTE_TAXONOMY | MEETING_SUMMARY",
-        "title": "string",
-        "snippet": "string",
-        "metadata": {}
-      }
-    ]
-  },
-
   "outputSchema": {
     "schemaVersion": "string",
-    "allowedBlockTypes": ["TEXT", "BULLET_LIST", "ACTION_LIST", "KEY_VALUE", "SNIPPET", "SECTION"],
+    "allowedBlockTypes": ["TEXT", "BULLET_LIST", "KEY_VALUE", "SNIPPET", "SECTION"],
     "responseFormat": "JSON"
   },
 
@@ -117,7 +94,7 @@
 |---|---|---|---|
 | `actor` | Required | Required | Required |
 | `domain` | Required | Required | Required |
-| `prompt.variables` | Required | Required | Required |
+| `userInstruction` | null | null | null |
 | `meetingContext` | Required | Required | Required (meetingId + speakerMapping only) |
 | `meetingContext.meetingType` | Required | Required | Not sent |
 | `meetingContext.transcript` | Required | Required | Not sent |
@@ -127,7 +104,7 @@
 | `customerContext` | Not sent | Required | Required |
 | `customerContext.profile` | Not sent | Not sent | Not sent |
 | `agentContext` | Required | Required | Required |
-| `grounding.retrievedContext` | Not sent | Required (FLP + soft attribute taxonomy) | Required (agent-edited summary) |
+| `meetingContext.editedSummaryText` | Not sent | Not sent | Required |
 
 ---
 
@@ -147,10 +124,10 @@
     "contentBlocks": [
       {
         "blockId": "string — unique block identifier within this response",
-        "type": "TEXT | BULLET_LIST | ACTION_LIST | KEY_VALUE | SNIPPET | SECTION",
+        "type": "TEXT | BULLET_LIST | KEY_VALUE | SNIPPET | SECTION",
         "title": "string — section heading",
         "body": "string | null — populated for TEXT type only; markdown supported",
-        "data": "object | null — populated for BULLET_LIST, ACTION_LIST, KEY_VALUE, SNIPPET leaf types",
+        "data": "object | null — populated for BULLET_LIST, KEY_VALUE, SNIPPET leaf types",
         "childBlocks": "array | null — populated for SECTION type only; children cannot be SECTION"
       }
     ],
@@ -163,9 +140,14 @@
   },
 
   "usage": {
-    "model": "string",
     "inputTokens": "number",
     "outputTokens": "number"
+  },
+
+  "debug": {
+    "promptTemplateId": "string — template resolved and used by AI team",
+    "promptTemplateVersion": "string — version of the template used",
+    "model": "string — LLM model identifier used for this call"
   },
 
   "error": {
@@ -191,21 +173,6 @@ Used for: Overview narrative, shareable summary WhatsApp message.
 { "items": [{ "text": "string" }] }
 ```
 Used for: Discussion points, all-action-items display list (inside SECTION "Action Items").
-
-**`ACTION_LIST`**
-```json
-{
-  "items": [
-    {
-      "action": "string",
-      "owner": "CUSTOMER | ADVISOR",
-      "customerName": "string | null — populated when owner = CUSTOMER and multiple customers present",
-      "dueDate": "ISO 8601 date | null"
-    }
-  ]
-}
-```
-Used for: Advisor-only structured task list (feeds Tasks system). Default due date logic: weekday+1, Friday+3, Saturday+2 (see Section 3.11 of requirements).
 
 **`KEY_VALUE`**
 ```json
@@ -236,23 +203,22 @@ Used for: Per-speaker snippets on the agent tagging screen.
 {
   "title": "string — section header",
   "childBlocks": [
-    { "type": "BULLET_LIST | ACTION_LIST | KEY_VALUE | TEXT | SNIPPET", "title": "...", "data": "..." }
+    { "type": "BULLET_LIST | KEY_VALUE | TEXT | SNIPPET", "title": "...", "data": "..." }
   ]
 }
 ```
-Used for: Action items grouping (BULLET_LIST all items + ACTION_LIST advisor tasks), attribute grouping per customer (one KEY_VALUE child per customer). Children cannot be `SECTION`.
+Used for: Action items grouping (all items as BULLET_LIST), attribute grouping per customer (one KEY_VALUE child per customer). Children cannot be `SECTION`.
 
-### `ACTION_LIST` vs `tasks` — distinction
+### `BULLET_LIST` vs `tasks[]` — action items pattern
 
-Both are produced in the `FULL_SUMMARY` response and represent the same advisor action items in two different shapes.
+For `FULL_SUMMARY`, action items are represented in two shapes for different consumers:
 
-| | `ACTION_LIST` block in `contentBlocks` | `tasks` array |
+| | `BULLET_LIST` in SECTION "Action Items" | `tasks[]` array |
 |---|---|---|
-| Purpose | UI display of advisor action items inline with the meeting summary content | Structured feed to the Tasks/dashboard system — shown as advisor to-dos |
-| SubIntent | `FULL_SUMMARY` only | `FULL_SUMMARY` only |
-| Scope | Advisor-only items (does not include customer action items — those are in the sibling BULLET_LIST within the SECTION) | Advisor-only items |
-| Format | SECTION "Action Items" → child ACTION_LIST "Advisor Tasks" (inside `contentBlocks`) | Top-level `response.tasks[]` array |
-| Consumers | Advisor App UI (meeting summary screen) | Tasks/dashboard service (separate downstream call) |
+| Purpose | UI display of all action items (customer + advisor) inline on the meeting summary screen | Structured feed to the Tasks/dashboard system — advisor to-dos only |
+| Scope | All parties — customer items prefixed with customer name, advisor items prefixed with "Advisor" | Advisor-only items |
+| Format | SECTION "Action Items" → child BULLET_LIST (inside `contentBlocks`) | Top-level `response.tasks[]` |
+| Consumers | Advisor App UI | Tasks/dashboard service |
 
 ---
 
@@ -271,23 +237,7 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
   "domain": "SALES",
   "intent": "MEETING_SUMMARY",
   "subIntent": "SNIPPET",
-  "modelConfig": {
-    "processingMode": "STANDARD",
-    "maxOutputTokens": 500
-  },
-  "prompt": {
-    "templateId": "tpl-snippet-v1",
-    "templateVersion": "1.0.0",
-    "variables": {
-      "market": "SG",
-      "language": "mixed",
-      "meetingType": "VOICE_RECAP",
-      "numCustomers": 1
-    },
-    "systemInstruction": null,
-    "developerInstruction": null,
-    "userInstruction": null
-  },
+  "userInstruction": null,
   "meetingContext": {
     "meetingId": "mtg-1001",
     "meetingType": "VOICE_RECAP",
@@ -343,9 +293,13 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
     "tasks": null
   },
   "usage": {
-    "model": "ge-llm-v2",
     "inputTokens": 312,
     "outputTokens": 98
+  },
+  "debug": {
+    "promptTemplateId": "tpl-snippet-v1",
+    "promptTemplateVersion": "1.0.0",
+    "model": "ge-llm-v2"
   },
   "error": null
 }
@@ -378,7 +332,7 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
 
 ## 5. Sample — `FULL_SUMMARY`
 
-**Scenario**: Standard transcript (one customer, Marcus). Agent has completed speaker tagging (spk_1 → Marcus). FLP and soft attribute taxonomies passed as grounding context. Orchestrator calls `/llm/meeting-summary` for the full summary output.
+**Scenario**: Standard transcript (one customer, Marcus). Agent has completed speaker tagging (spk_1 → Marcus). Orchestrator calls `/llm/meeting-summary` for the full summary output. FLP and soft attribute taxonomies are managed within the AI team's prompt template.
 
 ### Request
 
@@ -391,24 +345,7 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
   "domain": "SALES",
   "intent": "MEETING_SUMMARY",
   "subIntent": "FULL_SUMMARY",
-  "modelConfig": {
-    "processingMode": "STANDARD",
-    "maxOutputTokens": 2000
-  },
-  "prompt": {
-    "templateId": "tpl-full-summary-v1",
-    "templateVersion": "1.0.0",
-    "variables": {
-      "market": "SG",
-      "language": "mixed",
-      "meetingType": "STANDARD_TRANSCRIPT",
-      "numCustomers": 1,
-      "agentName": "Nisha"
-    },
-    "systemInstruction": null,
-    "developerInstruction": null,
-    "userInstruction": null
-  },
+  "userInstruction": null,
   "meetingContext": {
     "meetingId": "mtg-1001",
     "meetingType": "STANDARD_TRANSCRIPT",
@@ -432,27 +369,9 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
     "agentId": "agt-101",
     "agentName": "Nisha"
   },
-  "grounding": {
-    "retrievedContext": [
-      {
-        "sourceId": "taxonomy-flp-sg-v1",
-        "sourceType": "ATTRIBUTE_TAXONOMY",
-        "title": "FLP Attribute Taxonomy — SG (90 attributes, 14 categories)",
-        "snippet": "Income | Annual Bonus | CPF OA Balance | CPF SA Balance | CPF RA Balance | Cash Savings | Investments | Capital Assets | Child University Fees | Child University Savings | Monthly Expenses | Insurance Coverage | Mortgage / Loan | Retirement Income ... [full taxonomy — 90 attributes]",
-        "metadata": { "market": "SG", "version": "1.0" }
-      },
-      {
-        "sourceId": "taxonomy-soft-v1",
-        "sourceType": "ATTRIBUTE_TAXONOMY",
-        "title": "Soft Attribute Taxonomy (40 attributes, 6 categories)",
-        "snippet": "Career Change | Travel Plans | Sports and Fitness Preferences | Food and Dining Preferences | Marital or Relationship Dynamics | Family and Life Stage ... [full taxonomy — 40 attributes]",
-        "metadata": { "version": "1.0" }
-      }
-    ]
-  },
   "outputSchema": {
     "schemaVersion": "1.0",
-    "allowedBlockTypes": ["TEXT", "BULLET_LIST", "ACTION_LIST", "KEY_VALUE", "SECTION"],
+    "allowedBlockTypes": ["TEXT", "BULLET_LIST", "KEY_VALUE", "SECTION"],
     "responseFormat": "JSON"
   },
   "requestMetadata": {
@@ -522,26 +441,6 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
                 { "text": "Advisor: Prepare and present proposal at next meeting (Thursday evening)." }
               ]
             }
-          },
-          {
-            "type": "ACTION_LIST",
-            "title": "Advisor Tasks",
-            "data": {
-              "items": [
-                {
-                  "action": "Perform proper financial calculations based on received documents",
-                  "owner": "ADVISOR",
-                  "customerName": null,
-                  "dueDate": null
-                },
-                {
-                  "action": "Prepare and present proposal at next meeting (Thursday evening)",
-                  "owner": "ADVISOR",
-                  "customerName": null,
-                  "dueDate": "2026-04-17"
-                }
-              ]
-            }
           }
         ]
       },
@@ -603,15 +502,19 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
     ]
   },
   "usage": {
-    "model": "ge-llm-v2",
     "inputTokens": 1240,
     "outputTokens": 680
+  },
+  "debug": {
+    "promptTemplateId": "tpl-full-summary-v1",
+    "promptTemplateVersion": "1.0.0",
+    "model": "ge-llm-v2"
   },
   "error": null
 }
 ```
 
-> `tasks[]` mirrors the advisor-only ACTION_LIST items in a flat structured format for the dashboard/Tasks system. Customer action items (e.g., "Marcus: Send policy details") appear in the BULLET_LIST within contentBlocks but are NOT included in `tasks[]`.
+> `tasks[]` contains advisor-only action items in a structured format for the dashboard/Tasks system. Customer action items (e.g., "Customer — Marcus: Send policy details") appear in the BULLET_LIST within `contentBlocks` but are NOT included in `tasks[]`.
 
 **Multi-customer note**: When `numCustomers` > 1, each SECTION "FLP Attributes" and "Soft Attributes" contains one `KEY_VALUE` child block per customer (e.g., "John" and "Sarah"). The SECTION "Action Items" BULLET_LIST prefixes each item with the customer name (e.g., `"Customer — John: ..."`, `"Customer — Sarah: ..."`). The FULL_SUMMARY Overview TEXT block is unified across all customers.
 
@@ -621,7 +524,7 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
 
 ## 6. Sample — `SHARABLE_SUMMARY`
 
-**Scenario**: Agent has reviewed, edited, and saved the meeting summary for Marcus. Agent taps "Create shareable summary". Orchestrator passes the agent-edited summary as grounding and calls `/llm/meeting-summary`.
+**Scenario**: Agent has reviewed, edited, and saved the meeting summary for Marcus. Agent taps "Create shareable summary". Orchestrator passes the agent-edited summary text in `meetingContext.editedSummaryText` and calls `/llm/meeting-summary`.
 
 ### Request
 
@@ -634,28 +537,13 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
   "domain": "SALES",
   "intent": "MEETING_SUMMARY",
   "subIntent": "SHARABLE_SUMMARY",
-  "modelConfig": {
-    "processingMode": "FAST",
-    "maxOutputTokens": 350
-  },
-  "prompt": {
-    "templateId": "tpl-sharable-summary-v1",
-    "templateVersion": "1.0.0",
-    "variables": {
-      "market": "SG",
-      "language": "en",
-      "customerName": "Marcus",
-      "agentName": "Nisha"
-    },
-    "systemInstruction": null,
-    "developerInstruction": null,
-    "userInstruction": null
-  },
+  "userInstruction": null,
   "meetingContext": {
     "meetingId": "mtg-1001",
     "speakerMapping": [
       { "speakerId": "spk_1", "customerId": "cust-marcus-001" }
-    ]
+    ],
+    "editedSummaryText": "Post-career transition review with Marcus. Discussed: recent job change (banking to fintech startup), condo loan ($1.1M), protection gaps (no CI, no personal accident). Action items: Marcus to send policy details, CPF summary, expense breakdown. Advisor to prepare proposal. Next meeting: Thursday evening."
   },
   "customerContext": [
     {
@@ -668,20 +556,6 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
   "agentContext": {
     "agentId": "agt-101",
     "agentName": "Nisha"
-  },
-  "grounding": {
-    "retrievedContext": [
-      {
-        "sourceId": "mtg-1001-edited-summary",
-        "sourceType": "MEETING_SUMMARY",
-        "title": "Agent-Edited Meeting Summary — Marcus",
-        "snippet": "Post-career transition review with Marcus. Discussed: recent job change (banking to fintech startup), condo loan ($1.1M), protection gaps (no CI, no personal accident). Action items: Marcus to send policy details, CPF summary, expense breakdown. Advisor to prepare proposal. Next meeting: Thursday evening.",
-        "metadata": {
-          "editedByAgent": true,
-          "savedAt": "2026-04-14T20:05:00+08:00"
-        }
-      }
-    ]
   },
   "outputSchema": {
     "schemaVersion": "1.0",
@@ -721,9 +595,13 @@ Both are produced in the `FULL_SUMMARY` response and represent the same advisor 
     "tasks": null
   },
   "usage": {
-    "model": "ge-llm-v2",
     "inputTokens": 280,
     "outputTokens": 145
+  },
+  "debug": {
+    "promptTemplateId": "tpl-sharable-summary-v1",
+    "promptTemplateVersion": "1.0.0",
+    "model": "ge-llm-v2"
   },
   "error": null
 }

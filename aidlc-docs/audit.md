@@ -125,3 +125,11 @@
 **Context**: INCEPTION — Requirements Analysis, design correction on tasks[] ownership.
 
 ---
+
+## Architecture Decision — Orchestrator Retained, Context Assembly Owned by Orchestrator
+**Timestamp**: 2026-04-21T00:00:00Z
+**User Input**: "My final decision on the keeping the Orchestrator vs leveraging on Pega(GP) backend only - I will keep the orchestrator and do the context assembly on Orchestrator only. The Orchestrator can be skipped where there is no need of context assembly such as generating transcription and snippet. 90% of the context will come from CDH system which will be through API as GP also doesn't have direct access to CDH database. Rest few information that is needed from GP database, I will get them to create the plumbing enquiry APIs. Whatever needs to be persisted can be persisted by GP as anyway the interaction with go through GP."
+**AI Response**: Decision recorded. Key implications: (1) Orchestrator owns context assembly — calls CDH API directly (~90% of context: customer profile, past summaries, leads, opportunities, products) and GP enquiry APIs (transcript, agent info). (2) GP creates small set of read-only enquiry APIs for Orchestrator. (3) All persistence stays with GP. (4) Orchestrator is bypassed entirely for the async Transcribe/snippet pipeline (Phases 1–4). Updated SEQ-001 v1.1: Phase 5 now shows Orchestrator calling GP enquiry API + CDH API before assembling LLM request; Phase 7 similarly updated. Corrected Key Design Notes — removed "Orchestrator is stateless" note, replaced with accurate context assembly ownership description.
+**Context**: INCEPTION — Requirements Analysis, Orchestrator architecture finalised.
+
+---

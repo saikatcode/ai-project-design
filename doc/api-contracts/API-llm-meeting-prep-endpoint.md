@@ -12,9 +12,9 @@
 
 `POST /llm/meeting-prep` generates AI-assisted meeting preparation notes for an upcoming customer meeting. Operations are distinguished by `subIntent`, which reflects how much customer history is available.
 
-**Caller flow**: Pega → Axway T2 → Orchestrator → `POST /llm/meeting-prep` (AI Team)
+**Caller flow**: Pega → Axway T2 → Orchestrator → AWS API Gateway → `POST /llm/meeting-prep` (AI Team)
 
-> **Note**: Axway T2 is the enterprise API gateway at the external boundary (Pega → Orchestrator). AWS API Gateway sits internally within the VPC in front of the Orchestrator service — it is an infrastructure detail covered in the infrastructure design documents, not the API contract.
+> **Note**: Two API gateways are in the call chain with different roles. Axway T2 is the enterprise API gateway for inbound calls (Pega → Orchestrator). AWS API Gateway is the AI team's outbound boundary (Orchestrator → LLM services) — it authenticates and routes calls into the AI team's private VPC. Authentication mechanism for AWS API Gateway calls (API key, SigV4, or custom authorizer) to be confirmed with AI team.
 
 ### SubIntent Registry
 
@@ -42,21 +42,7 @@
   "intent": "MEETING_PREP_NOTES",
   "subIntent": "NEW_CUSTOMER | EXISTING_WITH_MEETINGS | EXISTING_WITHOUT_MEETINGS",
 
-  "modelConfig": {
-    "processingMode": "FAST | STANDARD | DEEP_THINK",
-    "maxOutputTokens": "number"
-  },
-
-  "prompt": {
-    "templateId": "string — references prompt template in Intent Registry",
-    "templateVersion": "string — version for traceability and rollback",
-    "variables": {
-      "key": "value — runtime values sent to the AI team for substitution into the prompt template (e.g. market, agentName, numCustomers). The Orchestrator holds the templateId only — the template text is owned and versioned by the AI team. Sending variables preserves the prompt governance boundary: AI team owns prompts, Orchestrator supplies context."
-    },
-    "systemInstruction": "string | null — optional override; use only when dynamic context cannot be expressed via variables",
-    "developerInstruction": "string | null — optional override",
-    "userInstruction": "string | null — optional override"
-  },
+  "userInstruction": "string | null — free-text instruction from the end user; null for all UC-02 fixed-intent flows",
 
   "customerContext": [
     {
@@ -115,7 +101,7 @@
 |---|---|---|---|
 | `actor` | Required | Required | Required |
 | `domain` | Required | Required | Required |
-| `prompt.variables` | Required | Required | Required |
+| `userInstruction` | null | null | null |
 | `customerContext` | Empty array `[]` | Required | Required |
 | `customerContext.profile` | Not sent | Required | Optional |
 | `customerContext.pastMeetingSummaries` | Not sent | Required | Not sent |
@@ -151,9 +137,14 @@
   },
 
   "usage": {
-    "model": "string",
     "inputTokens": "number",
     "outputTokens": "number"
+  },
+
+  "debug": {
+    "promptTemplateId": "string — template resolved and used by AI team",
+    "promptTemplateVersion": "string — version of the template used",
+    "model": "string — LLM model identifier used for this call"
   },
 
   "error": {
@@ -189,7 +180,7 @@ Used for: Conversation starters, discussion questions, recommended topics, closi
 ```
 Used for: Each numbered section of the meeting prep guide. Children cannot be `SECTION`.
 
-> **Note**: `ACTION_LIST` and `KEY_VALUE` blocks are not applicable to this endpoint.
+> **Note**: `ACTION_LIST`, `KEY_VALUE`, and `SNIPPET` blocks are not applicable to this endpoint.
 
 ---
 
@@ -208,21 +199,7 @@ Used for: Each numbered section of the meeting prep guide. Children cannot be `S
   "domain": "SALES",
   "intent": "MEETING_PREP_NOTES",
   "subIntent": "NEW_CUSTOMER",
-  "modelConfig": {
-    "processingMode": "STANDARD",
-    "maxOutputTokens": 1500
-  },
-  "prompt": {
-    "templateId": "tpl-meetingprep-new-v1",
-    "templateVersion": "1.0.0",
-    "variables": {
-      "market": "SG",
-      "agentName": "Nisha"
-    },
-    "systemInstruction": null,
-    "developerInstruction": null,
-    "userInstruction": null
-  },
+  "userInstruction": null,
   "customerContext": [],
   "agentContext": {
     "agentId": "agt-101",
@@ -395,9 +372,13 @@ Used for: Each numbered section of the meeting prep guide. Children cannot be `S
     ]
   },
   "usage": {
-    "model": "ge-llm-v2",
     "inputTokens": 420,
     "outputTokens": 890
+  },
+  "debug": {
+    "promptTemplateId": "tpl-meetingprep-new-v1",
+    "promptTemplateVersion": "1.0.0",
+    "model": "ge-llm-v2"
   },
   "error": null
 }
@@ -420,22 +401,7 @@ Used for: Each numbered section of the meeting prep guide. Children cannot be `S
   "domain": "SALES",
   "intent": "MEETING_PREP_NOTES",
   "subIntent": "EXISTING_WITH_MEETINGS",
-  "modelConfig": {
-    "processingMode": "STANDARD",
-    "maxOutputTokens": 2000
-  },
-  "prompt": {
-    "templateId": "tpl-meetingprep-existing-with-v1",
-    "templateVersion": "1.0.0",
-    "variables": {
-      "market": "SG",
-      "agentName": "Nisha",
-      "numCustomers": 1
-    },
-    "systemInstruction": null,
-    "developerInstruction": null,
-    "userInstruction": null
-  },
+  "userInstruction": null,
   "customerContext": [
     {
       "customerId": "cust-john-002",
@@ -605,9 +571,13 @@ Used for: Each numbered section of the meeting prep guide. Children cannot be `S
     ]
   },
   "usage": {
-    "model": "ge-llm-v2",
     "inputTokens": 680,
     "outputTokens": 1100
+  },
+  "debug": {
+    "promptTemplateId": "tpl-meetingprep-existing-with-v1",
+    "promptTemplateVersion": "1.0.0",
+    "model": "ge-llm-v2"
   },
   "error": null
 }

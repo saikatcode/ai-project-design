@@ -283,7 +283,7 @@ Meeting Prep (`POST /llm/meeting-prep`) does **not** produce tasks. It produces 
 ```
 
 **Rules:**
-- `tasks[]` contains advisor-only action items (not customer action items — those are shown in the UI via the ACTION_LIST block in `contentBlocks`)
+- `tasks[]` contains advisor-only action items (not customer action items — those are shown in the UI via the BULLET_LIST block within the SECTION "Action Items" in `contentBlocks`)
 - Due date logic: weekday+1, Friday+3, Saturday+2 unless a specific date is determinable from the transcript (see Section 3.11)
 - `tasks[]` is produced in the same `FULL_SUMMARY` response alongside the meeting summary, FLP attributes, soft attributes, and action items
 - Tasks are consumed by a downstream Tasks/dashboard service to surface advisor to-dos
